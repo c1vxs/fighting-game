@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MENA FIGHTS!</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d0d1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    user-select: none;
+  }
+  h1 {
+    font-size: 26px;
+    color: #ff69b4;
+    letter-spacing: 4px;
+    margin-bottom: 10px;
+    text-shadow: 0 0 12px #ff69b4;
+  }
+  canvas {
+    border: 3px solid #ff69b4;
+    box-shadow: 0 0 24px rgba(255,105,180,0.4);
+    display: block;
+  }
+  #ctrl {
+    margin-top: 10px;
+    color: #666;
+    font-size: 13px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<h1>⚡ MENA FIGHTS! ⚡</h1>
+<canvas id="c" width="800" height="390"></canvas>
+<div id="ctrl">← → Move &nbsp;|&nbsp; ↑ Jump &nbsp;|&nbsp; Z Punch &nbsp;|&nbsp; X Kick</div>
+
+<script>
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+const GY = 308; // ground y (feet level)
+const W = 800, H = 390;
+
+// ── Pre-generate city windows (stable across frames) ───────
+const buildings = [
+  {x:0,  w:70, h:120}, {x:65, w:50, h:80},  {x:110,w:90, h:160},
+  {x:195,w:60, h:100}, {x:250,w:80, h:140}, {x:320,w:55, h:90},
+  {x:365,w:100,h:180}, {x:455,w:65, h:110}, {x:510,w:85, h:150},
+  {x:585,w:70, h:120}, {x:645,w:90, h:95},  {x:725,w:75, h:135},
+];
+const windows = [];
+let wseed = 1;
+function srand(n) { wseed = (wseed * 9301 + 49297 + n) % 233280; return wseed / 233280; }
+buildings.forEach(b => {
+  for (let wy = GY - b.h + 8; wy < GY - 10; wy += 18)
+    for (let wx = b.x + 6; wx < b.x + b.w - 8; wx += 14)
+      if (srand(wx + wy) > 0.3)
+        windows.push({x: wx, y: wy});
+});
+
+// ── Fighter class ──────────────────────────────────────────
+class Fighter {
+  constructor(x, facing, isPlayer, drawFn) {
+    this.x = x; this.y = GY;
+    this.vx = 0; this.vy = 0;
+    this.facing = facing;
+    this.onGround = true;
+    this.hp = 100;
+    this.isPlayer = isPlayer;
+    this.drawFn = drawFn;
+    this.attacking = false;
+    this.atkKind = null;
+    this.atkTimer = 0;
+    this.hitFlash = 0;
+    this.walkCycle = 0;
+    this.moving = false;
+    this.aiCool = 0;
+    this.dead = false;
+  }
+
+  jump() {
+    if (this.onGround && !this.dead) { this.vy = -17; this.onGround = false; }
+  }
+
+  doAttack(kind, other) {
+    if (this.attacking || this.dead) return;
+    this.attacking = true;
+    this.atkKind = kind;
+    this.atkTimer = kind === 'punch' ? 20 : 26;
+    const reach = kind === 'punch' ? 74 : 90;
+    const dx = other.x - this.x;
+    if (Math.abs(dx) < reach && Math.sign(dx) === this.facing) {
+      const dmg = kind === 'punch' ? 8 : 13;
+      other.hp = Math.max(0, other.hp - dmg);
+      other.hitFlash = 14;
+      other.vx += this.facing * (kind === 'punch' ? 5 : 9);
+      if (!other.hp) other.dead = true;
+    }
+  }
+
+  update(other) {
+    this.vy += 0.72;
+    this.x += this.vx;
+    this.y += this.vy;
+    if (this.y >= GY) { this.y = GY; this.vy = 0; this.onGround = true; }
+    this.x = Math.max(30, Math.min(770, this.x));
+    this.vx *= 0.76;
+    if (Math.abs(this.vx) < 0.15) { this.vx = 0; this.moving = false; }
+    if (!this.dead && other) this.facing = other.x > this.x ? 1 : -1;
+    if (this.atkTimer > 0 && --this.atkTimer === 0) { this.attacking = false; this.atkKind = null; }
+    if (this.hitFlash > 0) this.hitFlash--;
+    if ((this.moving || Math.abs(this.vx) > 0.4) && this.onGround)
+      this.walkCycle += 0.22;
+  }
+
+  aiThink(player) {
+    if (this.dead || !player || player.dead) return;
+    if (--this.aiCool > 0) return;
+    this.aiCool = 22 + Math.random() * 35;
+    const dx = player.x - this.x;
+    const dist = Math.abs(dx);
+    const r = Math.random();
+    if (dist > 130) {
+      this.vx = this.facing * 3.8;
+      this.moving = true;
+    } else if (dist < 55 && r < 0.45) {
+      this.vx = -this.facing * 3; this.moving = true;
+    } else if (dist < 85) {
+      if (r < 0.5) this.doAttack('punch', player);
+      else if (r < 0.75) this.doAttack('kick', player);
+      else { this.vx = this.facing * 2; this.moving = true; }
+    } else {
+      this.vx = this.facing * 2.5; this.moving = true;
+    }
+    if (Math.random() < 0.07) this.jump();
+  }
+
+  draw() {
+    cx.save();
+    cx.translate(this.x, this.y);
+    if (this.facing === -1) cx.scale(-1, 1);
+    if (this.hitFlash > 0 && this.hitFlash % 4 < 2) cx.globalAlpha = 0.35;
+    this.drawFn(cx, this.walkCycle, this.attacking, this.atkKind, this.onGround, this.dead);
+    cx.restore();
+
+    // hit effect
+    if (this.attacking && this.atkTimer > 14) {
+      const ex = this.x + this.facing * 62;
+      const ey = this.atkKind === 'punch' ? this.y - 68 : this.y - 28;
+      cx.save();
+      cx.globalAlpha = 0.88;
+      // starburst
+      cx.fillStyle = this.atkKind === 'punch' ? '#FFD700' : '#FF6600';
+      const spikes = 8, or = 22, ir = 11;
+      cx.beginPath();
+      for (let i = 0; i < spikes * 2; i++) {
+        const a = (i * Math.PI) / spikes;
+        const r = i % 2 === 0 ? or : ir;
+        i === 0 ? cx.moveTo(ex + Math.cos(a)*r, ey + Math.sin(a)*r)
+                : cx.lineTo(ex + Math.cos(a)*r, ey + Math.sin(a)*r);
+      }
+      cx.closePath(); cx.fill();
+      cx.fillStyle = 'white';
+      cx.font = 'bold 12px Courier New';
+      cx.textAlign = 'center'; cx.textBaseline = 'middle';
+      cx.fillText(this.atkKind === 'punch' ? 'POW!' : 'KICK!', ex, ey);
+      cx.restore();
+    }
+  }
+}
+
+// ── Draw Mena (brown skin, braids, pink outfit) ─────────────
+// All coords relative to feet at (0,0), drawn facing right
+function drawMena(cx, walk, atk, atkKind, onGround, dead) {
+  const skin = '#7B3F00', skin2 = '#5C2E00';
+  const hair = '#120500', hair2 = '#2a0e00';
+  const top  = '#E91E63', bot = '#7B1FA2', shoe = '#AD1457';
+
+  const sw = onGround ? Math.sin(walk) * 13 : 0; // leg swing
+  const dead_y = dead ? 25 : 0;
+
+  if (dead) {
+    // Dead: fallen on ground
+    cx.save(); cx.rotate(-Math.PI / 2.2);
+  }
+
+  // Back leg
+  cx.fillStyle = bot;
+  cx.save(); cx.translate(-7, -42 + dead_y); cx.rotate(-sw * Math.PI/180);
+  cx.fillRect(-5, 0, 10, 30);
+  cx.fillStyle = shoe; cx.fillRect(-6, 28, 14, 11);
+  cx.restore();
+
+  // Front leg
+  cx.fillStyle = bot;
+  cx.save(); cx.translate(7, -42 + dead_y); cx.rotate(sw * Math.PI/180);
+  cx.fillRect(-5, 0, 10, 30);
+  cx.fillStyle = shoe; cx.fillRect(-6, 28, 14, 11);
+  cx.restore();
+
+  // Kicking leg override
+  if (atk && atkKind === 'kick') {
+    cx.fillStyle = bot;
+    cx.save(); cx.translate(10, -38 + dead_y); cx.rotate(-42 * Math.PI/180);
+    cx.fillRect(-5, 0, 10, 36);
+    cx.fillStyle = shoe; cx.fillRect(-6, 34, 16, 11);
+    cx.restore();
+  }
+
+  // Body
+  cx.fillStyle = top;
+  cx.fillRect(-17, -74 + dead_y, 34, 34);
+
+  // Collar detail
+  cx.fillStyle = '#F48FB1';
+  cx.fillRect(-6, -74 + dead_y, 12, 8);
+
+  // Back arm
+  cx.fillStyle = skin;
+  cx.fillRect(-30, -70 + dead_y, 15, 9);
+
+  // Front arm (punch extends)
+  const pExt = (atk && atkKind === 'punch') ? 22 : 0;
+  cx.fillStyle = skin;
+  cx.fillRect(15, -70 + dead_y, 18 + pExt, 9);
+
+  // Neck
+  cx.fillStyle = skin;
+  cx.fillRect(-5, -80 + dead_y, 10, 10);
+
+  // Head
+  cx.fillStyle = skin;
+  cx.beginPath();
+  cx.ellipse(0, -93 + dead_y, 17, 19, 0, 0, Math.PI*2); cx.fill();
+
+  // Ear
+  cx.fillStyle = skin2;
+  cx.beginPath();
+  cx.ellipse(-17, -93 + dead_y, 4, 5, 0, 0, Math.PI*2); cx.fill();
+
+  // Eye white
+  cx.fillStyle = 'white';
+  cx.beginPath(); cx.ellipse(7, -95 + dead_y, 4.5, 4.5, 0, 0, Math.PI*2); cx.fill();
+  // Iris
+  cx.fillStyle = '#1a0500';
+  cx.beginPath(); cx.ellipse(8, -95 + dead_y, 2.5, 2.5, 0, 0, Math.PI*2); cx.fill();
+  // Eyebrow
+  cx.strokeStyle = hair; cx.lineWidth = 2.5;
+  cx.beginPath(); cx.moveTo(3,-102+dead_y); cx.lineTo(13,-100+dead_y); cx.stroke();
+  // Smile
+  cx.strokeStyle = skin2; cx.lineWidth = 2;
+  cx.beginPath(); cx.arc(6, -87+dead_y, 6, 0.1, Math.PI-0.1); cx.stroke();
+
+  // ── BRAIDS ──
+  // Hair cap base
+  cx.fillStyle = hair;
+  cx.beginPath(); cx.ellipse(0, -108+dead_y, 17, 10, 0, 0, Math.PI*2); cx.fill();
+  cx.fillRect(-17, -108+dead_y, 34, 17);
+
+  // Part line
+  cx.strokeStyle = skin2; cx.lineWidth = 1;
+  cx.beginPath(); cx.moveTo(0,-115+dead_y); cx.lineTo(0,-108+dead_y); cx.stroke();
+
+  // Cornrow braids (top)
+  const braidX = [-11, -5.5, 0, 5.5, 11];
+  const braidL = [  32,  38, 42,  38,  32];
+  for (let i = 0; i < braidX.length; i++) {
+    const bx = braidX[i], bl = braidL[i];
+    for (let s = 0; s < bl; s += 5) {
+      cx.fillStyle = s % 10 < 5 ? hair : hair2;
+      cx.beginPath();
+      cx.ellipse(bx, -112+dead_y + s, 2.2, 3, 0, 0, Math.PI*2); cx.fill();
+    }
+    // pink bead at tip
+    cx.fillStyle = '#FF4081';
+    cx.beginPath(); cx.ellipse(bx, -112+dead_y + bl, 3, 3, 0, 0, Math.PI*2); cx.fill();
+  }
+
+  // Side hanging braids
+  for (let side of [-1, 1]) {
+    const sx = side * 15;
+    for (let s = 0; s < 28; s += 5) {
+      cx.fillStyle = s % 10 < 5 ? hair : hair2;
+      cx.beginPath();
+      cx.ellipse(sx + side * s*0.25, -105+dead_y + s, 2, 2.8, 0, 0, Math.PI*2); cx.fill();
+    }
+    cx.fillStyle = '#FF80AB';
+    cx.beginPath(); cx.ellipse(sx + side*7, -77+dead_y, 2.5, 2.5, 0, 0, Math.PI*2); cx.fill();
+  }
+
+  if (dead) cx.restore();
+}
+
+// ── Draw Chris (white boy, dark brown short hair) ─────────────
+function drawBoy(cx, walk, atk, atkKind, onGround, dead) {
+  const skin = '#FDBCB4', skin2 = '#E8A090';
+  const hair = '#3d1a00', hair2 = '#5a2800';
+  const shirt = '#1565C0', pants = '#263238', shoe = '#111';
+
+  const sw = onGround ? Math.sin(walk) * 13 : 0;
+  const dead_y = dead ? 25 : 0;
+
+  if (dead) { cx.save(); cx.rotate(-Math.PI / 2.2); }
+
+  // Back leg
+  cx.fillStyle = pants;
+  cx.save(); cx.translate(-7, -42 + dead_y); cx.rotate(-sw * Math.PI/180);
+  cx.fillRect(-5, 0, 10, 30);
+  cx.fillStyle = shoe; cx.fillRect(-6, 28, 14, 11);
+  cx.restore();
+
+  // Front leg
+  cx.fillStyle = pants;
+  cx.save(); cx.translate(7, -42 + dead_y); cx.rotate(sw * Math.PI/180);
+  cx.fillRect(-5, 0, 10, 30);
+  cx.fillStyle = shoe; cx.fillRect(-6, 28, 14, 11);
+  cx.restore();
+
+  // Kick override
+  if (atk && atkKind === 'kick') {
+    cx.fillStyle = pants;
+    cx.save(); cx.translate(10, -38+dead_y); cx.rotate(-42*Math.PI/180);
+    cx.fillRect(-5,0,10,36);
+    cx.fillStyle = shoe; cx.fillRect(-6,34,16,11);
+    cx.restore();
+  }
+
+  // Body
+  cx.fillStyle = shirt;
+  cx.fillRect(-17, -74+dead_y, 34, 34);
+  // Collar
+  cx.fillStyle = '#1976D2';
+  cx.fillRect(-6, -74+dead_y, 12, 8);
+
+  // Back arm
+  cx.fillStyle = skin;
+  cx.fillRect(-30, -70+dead_y, 15, 9);
+
+  // Front arm
+  const pExt = (atk && atkKind === 'punch') ? 22 : 0;
+  cx.fillStyle = skin;
+  cx.fillRect(15, -70+dead_y, 18+pExt, 9);
+
+  // Neck
+  cx.fillStyle = skin;
+  cx.fillRect(-5, -80+dead_y, 10, 10);
+
+  // Head
+  cx.fillStyle = skin;
+  cx.beginPath(); cx.ellipse(0, -92+dead_y, 16, 18, 0, 0, Math.PI*2); cx.fill();
+
+  // Ear
+  cx.fillStyle = skin2;
+  cx.beginPath(); cx.ellipse(-16, -92+dead_y, 4, 5, 0, 0, Math.PI*2); cx.fill();
+
+  // Eyes (blue-grey)
+  cx.fillStyle = '#78909C';
+  cx.beginPath(); cx.ellipse(7, -94+dead_y, 4, 4, 0, 0, Math.PI*2); cx.fill();
+  cx.fillStyle = '#212121';
+  cx.beginPath(); cx.ellipse(7.5, -94+dead_y, 2, 2, 0, 0, Math.PI*2); cx.fill();
+  // Serious eyebrow (angled)
+  cx.strokeStyle = hair; cx.lineWidth = 2.5;
+  cx.beginPath(); cx.moveTo(2,-101+dead_y); cx.lineTo(13,-99+dead_y); cx.stroke();
+  // Neutral mouth
+  cx.strokeStyle = '#c0856a'; cx.lineWidth = 2;
+  cx.beginPath(); cx.moveTo(2,-83+dead_y); cx.lineTo(10,-83+dead_y); cx.stroke();
+
+  // ── SHORT DARK BROWN HAIR ──
+  // Hair base cap
+  cx.fillStyle = hair;
+  cx.beginPath(); cx.ellipse(0, -105+dead_y, 16, 9, 0, 0, Math.PI*2); cx.fill();
+  cx.fillRect(-16, -105+dead_y, 32, 18);
+
+  // Hair texture: short strands
+  cx.fillStyle = hair2;
+  for (let xi = -12; xi <= 12; xi += 3) {
+    const hlen = 6 + ((xi * xi * 7 + 13) % 5); // deterministic variation
+    cx.fillRect(xi - 1, -113+dead_y, 2, hlen);
+  }
+
+  // Sideburns
+  cx.fillStyle = hair;
+  cx.fillRect(-19, -100+dead_y, 5, 14);
+  cx.fillRect(14,  -100+dead_y, 5, 10);
+
+  if (dead) cx.restore();
+}
+
+// ── Background ─────────────────────────────────────────────
+function drawBg() {
+  // Night sky
+  const sky = cx.createLinearGradient(0, 0, 0, GY);
+  sky.addColorStop(0, '#060618');
+  sky.addColorStop(1, '#2d1b4e');
+  cx.fillStyle = sky;
+  cx.fillRect(0, 0, W, GY);
+
+  // Moon
+  cx.fillStyle = '#fffde7';
+  cx.beginPath(); cx.arc(680, 50, 28, 0, Math.PI*2); cx.fill();
+  cx.fillStyle = '#060618';
+  cx.beginPath(); cx.arc(692, 44, 24, 0, Math.PI*2); cx.fill();
+
+  // Stars (fixed positions)
+  cx.fillStyle = 'rgba(255,255,255,0.8)';
+  [[32,18],[88,42],[155,12],[230,38],[340,20],[420,48],[500,14],[580,35],[730,22],[760,55]].forEach(([sx,sy]) => {
+    cx.beginPath(); cx.arc(sx, sy, 1.5, 0, Math.PI*2); cx.fill();
+  });
+
+  // City silhouette
+  cx.fillStyle = '#0a0a18';
+  buildings.forEach(b => cx.fillRect(b.x, GY - b.h, b.w, b.h));
+  // Lit windows
+  cx.fillStyle = 'rgba(255,220,100,0.55)';
+  windows.forEach(w => cx.fillRect(w.x, w.y, 8, 10));
+
+  // Ground
+  const grd = cx.createLinearGradient(0, GY, 0, H);
+  grd.addColorStop(0, '#3d2010');
+  grd.addColorStop(1, '#1a0a04');
+  cx.fillStyle = grd;
+  cx.fillRect(0, GY, W, H - GY);
+
+  // Ground highlight stripe
+  cx.fillStyle = '#5a3018';
+  cx.fillRect(0, GY, W, 5);
+
+  // Arena ring
+  cx.strokeStyle = 'rgba(255,105,180,0.25)';
+  cx.lineWidth = 2;
+  cx.beginPath(); cx.ellipse(400, GY+2, 230, 16, 0, 0, Math.PI*2); cx.stroke();
+  cx.strokeStyle = 'rgba(255,105,180,0.12)';
+  cx.lineWidth = 1;
+  cx.beginPath(); cx.ellipse(400, GY+2, 280, 20, 0, 0, Math.PI*2); cx.stroke();
+}
+
+// ── HUD ────────────────────────────────────────────────────
+function drawHUD() {
+  const BW = 220;
+  cx.save(); cx.textBaseline = 'middle';
+
+  // Mena bar
+  cx.fillStyle = '#0d0d0d';
+  cx.fillRect(18, 14, BW, 26);
+  const mf = (mena.hp / 100) * BW;
+  cx.fillStyle = mena.hp > 50 ? '#00e676' : mena.hp > 25 ? '#ffea00' : '#ff1744';
+  cx.fillRect(18, 14, mf, 26);
+  cx.strokeStyle = '#ff69b4'; cx.lineWidth = 2;
+  cx.strokeRect(18, 14, BW, 26);
+  cx.fillStyle = 'white'; cx.font = 'bold 13px Courier New'; cx.textAlign = 'left';
+  cx.fillText('MENA', 25, 27);
+  cx.fillStyle = '#aaa'; cx.font = '11px Courier New';
+  cx.fillText(mena.hp + ' HP', 25, 50);
+
+  // Ryan bar
+  cx.fillStyle = '#0d0d0d';
+  cx.fillRect(562, 14, BW, 26);
+  const bf = (ryan.hp / 100) * BW;
+  cx.fillStyle = ryan.hp > 50 ? '#00e676' : ryan.hp > 25 ? '#ffea00' : '#ff1744';
+  cx.fillRect(780 - bf, 14, bf, 26);
+  cx.strokeStyle = '#4169E1'; cx.lineWidth = 2;
+  cx.strokeRect(562, 14, BW, 26);
+  cx.fillStyle = 'white'; cx.font = 'bold 13px Courier New'; cx.textAlign = 'right';
+  cx.fillText('CHRIS', 775, 27);
+  cx.fillStyle = '#aaa'; cx.font = '11px Courier New';
+  cx.fillText(ryan.hp + ' HP', 775, 50);
+
+  // VS
+  cx.fillStyle = '#FFD700'; cx.font = 'bold 22px Courier New'; cx.textAlign = 'center';
+  cx.fillText('VS', 400, 27);
+
+  cx.restore();
+}
+
+// ── Screens ────────────────────────────────────────────────
+function drawTitle() {
+  drawBg();
+  cx.fillStyle = 'rgba(0,0,0,0.65)';
+  cx.fillRect(0, 0, W, H);
+
+  cx.textAlign = 'center'; cx.textBaseline = 'middle';
+
+  cx.font = 'bold 54px Courier New';
+  cx.fillStyle = '#FF69B4';
+  cx.shadowColor = '#FF69B4'; cx.shadowBlur = 20;
+  cx.fillText('MENA FIGHTS!', 400, 110);
+  cx.shadowBlur = 0;
+
+  cx.font = '17px Courier New'; cx.fillStyle = '#bbb';
+  cx.fillText('Mena (you) vs Chris (CPU)', 400, 160);
+
+  cx.font = '15px Courier New'; cx.fillStyle = '#FFD700';
+  cx.fillText('← →  Move     ↑  Jump', 400, 212);
+  cx.fillText('Z  Punch     X  Kick', 400, 238);
+
+  if (Math.floor(Date.now() / 550) % 2 === 0) {
+    cx.fillStyle = 'white'; cx.font = 'bold 18px Courier New';
+    cx.fillText('Press SPACE or ENTER to Start!', 400, 298);
+  }
+}
+
+function drawOver(winner) {
+  cx.fillStyle = 'rgba(0,0,0,0.72)';
+  cx.fillRect(0, 0, W, H);
+  cx.textAlign = 'center'; cx.textBaseline = 'middle';
+
+  if (winner === 'mena') {
+    cx.shadowColor = '#FF69B4'; cx.shadowBlur = 18;
+    cx.font = 'bold 46px Courier New'; cx.fillStyle = '#FF69B4';
+    cx.fillText('MENA WINS!', 400, 130);
+    cx.shadowBlur = 0;
+    cx.font = '22px Courier New'; cx.fillStyle = '#FFD700';
+    cx.fillText('She showed him what\'s up!', 400, 185);
+  } else if (winner === 'ryan') {
+    cx.shadowColor = '#4169E1'; cx.shadowBlur = 18;
+    cx.font = 'bold 46px Courier New'; cx.fillStyle = '#4169E1';
+    cx.fillText('CHRIS WINS!', 400, 130);
+    cx.shadowBlur = 0;
+    cx.font = '22px Courier New'; cx.fillStyle = '#aaa';
+    cx.fillText('Better luck next time, Mena...', 400, 185);
+  } else {
+    cx.font = 'bold 46px Courier New'; cx.fillStyle = '#FFD700';
+    cx.fillText('DRAW!', 400, 150);
+  }
+
+  if (Math.floor(Date.now() / 550) % 2 === 0) {
+    cx.fillStyle = 'white'; cx.font = 'bold 17px Courier New';
+    cx.fillText('Press SPACE or ENTER to Play Again!', 400, 268);
+  }
+}
+
+// ── Game state ─────────────────────────────────────────────
+let mena, ryan, state, winner;
+const keys = {};
+
+function newGame() {
+  mena = new Fighter(180, 1, true, drawMena);
+  ryan = new Fighter(620, -1, false, drawBoy);
+  state = 'playing';
+  winner = '';
+}
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['ArrowUp','ArrowDown','Space'].includes(e.code)) e.preventDefault();
+
+  if (state === 'playing') {
+    if (e.code === 'ArrowUp') mena.jump();
+    if (e.code === 'KeyZ') mena.doAttack('punch', ryan);
+    if (e.code === 'KeyX') mena.doAttack('kick', ryan);
+  }
+  if ((state === 'title' || state === 'over') &&
+      (e.code === 'Space' || e.code === 'Enter')) {
+    newGame();
+  }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ── Game loop ──────────────────────────────────────────────
+function loop() {
+  requestAnimationFrame(loop);
+  cx.clearRect(0, 0, W, H);
+
+  if (state === 'title') { drawTitle(); return; }
+
+  if (state === 'playing') {
+    if (keys['ArrowLeft'])  { mena.vx = -4.2; mena.moving = true; }
+    if (keys['ArrowRight']) { mena.vx =  4.2; mena.moving = true; }
+
+    mena.update(ryan);
+    ryan.update(mena);
+    ryan.aiThink(mena);
+
+    if (mena.dead || ryan.dead) {
+      state = 'over';
+      winner = mena.dead && ryan.dead ? 'draw' : mena.dead ? 'ryan' : 'mena';
+    }
+  }
+
+  drawBg();
+  ryan.draw();
+  mena.draw();
+  drawHUD();
+  if (state === 'over') drawOver(winner);
+}
+
+state = 'title';
+loop();
+</script>
+</body>
+</html>
